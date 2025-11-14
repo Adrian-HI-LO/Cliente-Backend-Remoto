@@ -436,7 +436,7 @@ done
         except Exception as e:
             logger.error(f'Error limpiando interceptor de mouse: {e}')
 
-    def shutdown_system(self):
+    def shutdown_system(self, force=False):
         """Apagar el sistema"""
         try:
             subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=True)
