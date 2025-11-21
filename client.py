@@ -43,6 +43,9 @@ SERVER_URL = 'http://localhost:8080'
 # GUI
 gui = None
 
+# Control de streaming
+streaming_active = False
+
 
 def get_client_id():
     """Generar ID único del cliente basado en información del sistema"""
@@ -75,7 +78,6 @@ def connect():
     import getpass
     from datetime import datetime
     
-    client_id = get_client_id()
     ip_address = system_info.get_ip_address()
     
     sio.emit('register_client', {
@@ -85,6 +87,16 @@ def connect():
         'user': getpass.getuser(),  # Usuario actual
         'connected_at': datetime.now().isoformat()  # Timestamp
     })
+
+
+@sio.on('connected')
+def on_connected(data):
+    """Recibir confirmación de conexión con el client_id asignado por el servidor"""
+    global CLIENT_ID
+    CLIENT_ID = data.get('client_id')
+    logger.info(f'✅ Cliente registrado con ID: {CLIENT_ID}')
+    if gui:
+        gui.display_system_message(f"📋 ID asignado: {CLIENT_ID}")
 
 
 @sio.event
@@ -113,7 +125,7 @@ def connect_error(data):
 def on_request_screenshot(data):
     """Capturar y enviar screenshot"""
     try:
-        logger.info('Capturando screenshot...')
+        logger.info('📸 Capturando screenshot...')
         
         quality = data.get('quality', 80)
         scale = data.get('scale', 1.0)
@@ -121,19 +133,24 @@ def on_request_screenshot(data):
         # Capturar screenshot
         screenshot_b64 = remote_control.capture_screenshot(quality, scale)
         
-        # Enviar al servidor
-        sio.emit('screenshot_data', {
-            'client_id': get_client_id(),
-            'screenshot': screenshot_b64,
-            'timestamp': system_info.get_system_stats().get('uptime')
-        })
-        
-        logger.info('Screenshot enviado')
+        if screenshot_b64:
+            # Enviar al servidor (el servidor sabe quién soy por request.sid)
+            sio.emit('screenshot_data', {
+                'screenshot': screenshot_b64,
+                'timestamp': system_info.get_system_stats().get('uptime')
+            })
+            logger.info('✅ Screenshot enviado al servidor')
+        else:
+            logger.error('❌ Error: Screenshot es None')
+            sio.emit('screenshot_error', {
+                'error': 'No se pudo capturar screenshot'
+            })
         
     except Exception as e:
-        logger.error(f'Error capturando screenshot: {e}')
+        logger.error(f'❌ Error capturando screenshot: {e}')
+        import traceback
+        logger.error(traceback.format_exc())
         sio.emit('screenshot_error', {
-            'client_id': get_client_id(),
             'error': str(e)
         })
 
@@ -144,32 +161,68 @@ def on_start_screen_stream(data):
     import threading
     import time
     
+    # Flag para controlar el streaming
+    global streaming_active
+    
+    # Si ya está activo, no iniciar otro thread
+    if streaming_active:
+        logger.info('⚠️ Stream ya activo, ignorando solicitud duplicada')
+        return
+
+    streaming_active = True
+    
     def stream_screen():
+        global streaming_active
         fps = data.get('fps', 10)
         quality = data.get('quality', 60)
         scale = data.get('scale', 0.5)
         interval = 1.0 / fps
         
-        logger.info(f'Iniciando stream de pantalla - FPS: {fps}')
+        logger.info(f'🎥 Iniciando stream de pantalla - FPS: {fps}, Quality: {quality}, Scale: {scale}')
         
-        while True:
+        frame_count = 0
+        while streaming_active:
             try:
                 screenshot_b64 = remote_control.capture_screenshot(quality, scale)
                 
-                sio.emit('screen_frame', {
-                    'client_id': get_client_id(),
-                    'frame': screenshot_b64
-                })
+                if screenshot_b64:
+                    # El servidor usará request.sid como client_id
+                    sio.emit('screen_frame', {
+                        'frame': screenshot_b64
+                    })
+                    frame_count += 1
+                    if frame_count % 30 == 0:  # Log cada 30 frames
+                        logger.info(f'📡 Frames enviados: {frame_count}')
+                else:
+                    logger.warning('⚠️  Screenshot es None en el stream')
                 
                 time.sleep(interval)
                 
             except Exception as e:
-                logger.error(f'Error en stream: {e}')
-                break
+                logger.error(f'❌ Error en stream: {e}')
+                # Si es un error fatal de X11/Wayland, detener el stream para evitar crash loop
+                if "BadMatch" in str(e) or "X_GetImage" in str(e):
+                    logger.critical("Error fatal de gráficos detectado. Deteniendo stream.")
+                    streaming_active = False
+                    break
+                import traceback
+                logger.error(traceback.format_exc())
+                time.sleep(1) # Esperar un poco antes de reintentar
+        
+        logger.info(f'⏹️  Stream detenido. Total de frames: {frame_count}')
+        streaming_active = False # Asegurar flag apagado al salir
     
     # Ejecutar en thread separado
     thread = threading.Thread(target=stream_screen, daemon=True)
     thread.start()
+
+
+@sio.on('stop_screen_stream')
+def on_stop_screen_stream(data):
+    """Detener streaming de pantalla"""
+    global streaming_active
+    streaming_active = False
+    logger.info('⏹️  Deteniendo stream de pantalla...')
 
 
 @sio.on('lock_keyboard')

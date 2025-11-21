@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# sudo apt-get install -y evtest
 """
 Sistema de control remoto - Versión AGRESIVA para Wayland
 Usa interceptores de eventos que consumen datos directamente
@@ -436,10 +437,123 @@ done
         except Exception as e:
             logger.error(f'Error limpiando interceptor de mouse: {e}')
 
-    def shutdown_system(self, force=False):
+    def shutdown_system(self):
         """Apagar el sistema"""
         try:
             subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=True)
             return {'success': True, 'message': 'Sistema apagándose...'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def capture_screenshot(self, quality=80, scale=1.0):
+        """Capturar screenshot de la pantalla de manera robusta"""
+        import io
+        import base64
+        from PIL import Image, ImageDraw, ImageFont
+        import tempfile
+        
+        img = None
+        method_used = None
+        
+        try:
+            # Método 1: Intentar grim primero si es Wayland (herramienta nativa más confiable)
+            if self.wayland_session and img is None:
+                try:
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                        tmp_name = tmp.name
+                    
+                    result = subprocess.run(['grim', tmp_name], 
+                                          check=True, 
+                                          timeout=2, 
+                                          stdout=subprocess.DEVNULL, 
+                                          stderr=subprocess.DEVNULL)
+                    
+                    if os.path.exists(tmp_name) and os.path.getsize(tmp_name) > 0:
+                        img = Image.open(tmp_name)
+                        img.load()
+                        method_used = 'grim'
+                    try:
+                        os.unlink(tmp_name)
+                    except:
+                        pass
+                except FileNotFoundError:
+                    # grim no está instalado
+                    pass
+                except Exception:
+                    pass
+
+            # Método 2: PyAutoGUI (bastante compatible con X11 via XWayland)
+            if img is None:
+                try:
+                    import pyautogui
+                    # Configurar DISPLAY si no existe
+                    env_backup = os.environ.get('DISPLAY')
+                    if 'DISPLAY' not in os.environ:
+                        os.environ['DISPLAY'] = ':0'
+                    
+                    img = pyautogui.screenshot()
+                    method_used = 'pyautogui'
+                    
+                    # Restaurar DISPLAY
+                    if env_backup is None and 'DISPLAY' in os.environ:
+                        del os.environ['DISPLAY']
+                except Exception as e:
+                    logger.warning(f'Fallo PyAutoGUI: {e}')
+            
+            # Método 3: MSS (rápido pero puede fallar en Wayland)
+            if img is None:
+                try:
+                    import mss
+                    with mss.mss() as sct:
+                        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                        screenshot = sct.grab(monitor)
+                        img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+                        method_used = 'mss'
+                except Exception as e:
+                    logger.warning(f'Fallo MSS: {e}')
+
+            if img is None:
+                # Generar imagen de error informativa
+                img = Image.new('RGB', (800, 600), color=(50, 50, 80))
+                draw = ImageDraw.Draw(img)
+                
+                # Texto de error
+                msg = "⚠ No se puede capturar pantalla"
+                msg2 = "Wayland está bloqueando el acceso"
+                msg3 = "Inicia sesión en modo X11/Xorg"
+                
+                try:
+                    draw.text((200, 250), msg, fill=(255, 255, 255))
+                    draw.text((150, 290), msg2, fill=(200, 200, 200))
+                    draw.text((170, 330), msg3, fill=(150, 150, 150))
+                except:
+                    pass  # Si no hay fuentes, al menos enviamos la imagen de color
+                
+                method_used = 'error_image'
+                logger.error('Todos los métodos de captura fallaron')
+                
+            # Procesar la imagen (común para todos los métodos)
+            # Redimensionar si es necesario
+            if scale != 1.0:
+                new_width = int(img.width * scale)
+                new_height = int(img.height * scale)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Convertir a JPEG y codificar en base64
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            img_bytes = buffer.getvalue()
+            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+            
+            return {
+                'data': img_b64,
+                'width': img.width,
+                'height': img.height
+            }
+                
+        except ImportError as e:
+            logger.error(f'Error de dependencias: {e}')
+            return None
+        except Exception as e:
+            logger.error(f'Error capturando screenshot: {e}')
+            return None
