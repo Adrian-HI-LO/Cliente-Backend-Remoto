@@ -9,6 +9,7 @@ import base64
 import os
 import platform
 from pathlib import Path
+import threading
 
 # Importar módulos locales
 from modules.system_info import SystemInfo
@@ -16,6 +17,7 @@ from modules.remote_control import RemoteControl
 from modules.file_transfer import FileTransfer
 from modules.web_restrictions import WebRestrictions
 from modules.network_control import NetworkControl
+from client_gui import ClientGUI
 
 # Configuración de logging
 logging.basicConfig(
@@ -37,6 +39,9 @@ network_control = NetworkControl()
 # Configuración del cliente
 CLIENT_ID = None
 SERVER_URL = 'http://localhost:8080'
+
+# GUI
+gui = None
 
 
 def get_client_id():
@@ -62,6 +67,10 @@ def connect():
     """Evento cuando se conecta al servidor"""
     logger.info(f'Conectado al servidor: {SERVER_URL}')
     
+    # Notificar a la GUI
+    if gui:
+        gui.display_system_message("✅ Conectado al servidor")
+    
     # Registrar cliente con el servidor
     import getpass
     from datetime import datetime
@@ -82,12 +91,20 @@ def connect():
 def disconnect():
     """Evento cuando se desconecta del servidor"""
     logger.info('Desconectado del servidor')
+    
+    # Notificar a la GUI
+    if gui:
+        gui.display_system_message("❌ Desconectado del servidor")
 
 
 @sio.event
 def connect_error(data):
     """Evento cuando hay error de conexión"""
     logger.error(f'Error de conexión: {data}')
+    
+    # Notificar a la GUI
+    if gui:
+        gui.display_system_message(f"⚠️  Error de conexión: {data}")
 
 
 # ============= Control remoto =============
@@ -447,17 +464,47 @@ def on_chat_message(data):
     try:
         message = data.get('message')
         from_user = data.get('from', 'Server')
+        timestamp = data.get('timestamp', '')
         
         logger.info(f'Mensaje de {from_user}: {message}')
         
-        # Mostrar notificación o guardar mensaje
-        # (implementar según requerimientos)
+        # Notificar a la GUI
+        if gui:
+            # Parsear timestamp si es ISO format
+            if timestamp:
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    timestamp = dt.strftime("%H:%M:%S")
+                except:
+                    pass
+            gui.display_message(from_user, message, timestamp, is_client=False)
         
         # Enviar confirmación de lectura
         sio.emit('message_read', {
             'client_id': get_client_id(),
             'message_id': data.get('message_id')
         })
+    except Exception as e:
+        logger.error(f'Error recibiendo mensaje: {e}')
+
+def send_message_to_server(message):
+    """Enviar mensaje al servidor"""
+    try:
+        from datetime import datetime
+        timestamp = datetime.now().isoformat()
+        
+        sio.emit('client_message', {
+            'message': message,
+            'timestamp': timestamp,
+            'client_id': get_client_id()
+        })
+        
+        logger.info(f'Mensaje enviado al servidor: {message}')
+        return True
+    except Exception as e:
+        logger.error(f'Error enviando mensaje: {e}')
+        return False
         
     except Exception as e:
         logger.error(f'Error procesando mensaje: {e}')
@@ -559,7 +606,9 @@ def on_ping_test(data):
 # ============= Función principal =============
 
 def main():
-    """Iniciar cliente"""
+    """Iniciar cliente con GUI"""
+    global gui
+    
     try:
         # Obtener URL del servidor de argumentos o variable de entorno
         server_url = os.getenv('MONITOR_SERVER_URL', SERVER_URL)
@@ -571,17 +620,39 @@ def main():
         logger.info(f'ID del cliente: {get_client_id()}')
         logger.info(f'Conectando a servidor: {server_url}')
         
-        # Conectar al servidor
-        sio.connect(server_url)
+        # Crear GUI
+        gui = ClientGUI(send_message_to_server)
+        gui.setup_gui()
         
-        # Mantener el cliente ejecutándose
-        sio.wait()
+        # Conectar al servidor en un thread separado
+        def connect_to_server():
+            try:
+                sio.connect(server_url)
+                sio.wait()
+            except Exception as e:
+                logger.error(f'Error en conexión SocketIO: {e}')
+                if gui and gui.root:
+                    gui.display_system_message(f"❌ Error de conexión: {e}")
+        
+        # Iniciar conexión en thread
+        socket_thread = threading.Thread(target=connect_to_server, daemon=True)
+        socket_thread.start()
+        
+        # Iniciar GUI (bloquea hasta que se cierre)
+        gui.run()
+        
+        # Al cerrar la GUI, desconectar socket
+        logger.info('GUI cerrada, desconectando...')
+        sio.disconnect()
         
     except KeyboardInterrupt:
         logger.info('Cliente detenido por el usuario')
-        sio.disconnect()
+        if sio.connected:
+            sio.disconnect()
     except Exception as e:
         logger.error(f'Error en cliente: {e}')
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
