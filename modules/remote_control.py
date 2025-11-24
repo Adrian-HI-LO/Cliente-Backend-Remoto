@@ -437,11 +437,19 @@ done
         except Exception as e:
             logger.error(f'Error limpiando interceptor de mouse: {e}')
 
-    def shutdown_system(self):
+    def shutdown_system(self, force=False):
         """Apagar el sistema"""
         try:
             subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=True)
             return {'success': True, 'message': 'Sistema apagándose...'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def restart_system(self, force=False):
+        """Reiniciar el sistema"""
+        try:
+            subprocess.run(['sudo', 'shutdown', '-r', 'now'], check=True)
+            return {'success': True, 'message': 'Sistema reiniciándose...'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
