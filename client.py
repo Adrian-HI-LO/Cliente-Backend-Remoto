@@ -484,29 +484,96 @@ def on_request_file_transfer(data):
         logger.error(f'Error en transferencia de archivo: {e}')
 
 
-@sio.on('file_chunk')
-def on_file_chunk(data):
-    """Recibir chunk de archivo del servidor"""
+# Buffer para almacenar chunks de archivos
+file_chunks_buffer = {}
+
+@sio.on('receive_file_from_server')
+def on_receive_file_from_server(data):
+    """Recibir archivo completo del servidor"""
     try:
         filename = data.get('filename')
-        chunk_index = data.get('chunk_index')
-        total_chunks = data.get('total_chunks')
-        chunk_data = data.get('data')
+        file_data = data.get('file_data')
         
-        # Guardar chunk (acumular en memoria o disco temporal)
-        # Implementar lógica de ensamblaje de chunks
+        logger.info(f'📥 Recibiendo archivo del servidor: {filename}')
         
-        if chunk_index == total_chunks - 1:
-            # Último chunk - guardar archivo completo
-            logger.info(f'Archivo recibido: {filename}')
+        # Preguntar dónde guardar el archivo usando la GUI
+        if gui:
+            success = gui.ask_save_location(filename, file_data)
             
-            sio.emit('file_transfer_complete', {
+            if success:
+                sio.emit('file_received_confirmation', {
+                    'client_id': get_client_id(),
+                    'filename': filename,
+                    'success': True
+                })
+            else:
+                sio.emit('file_received_confirmation', {
+                    'client_id': get_client_id(),
+                    'filename': filename,
+                    'success': False,
+                    'error': 'Usuario canceló guardado'
+                })
+        else:
+            logger.error('GUI no disponible para guardar archivo')
+            
+    except Exception as e:
+        logger.error(f'Error recibiendo archivo: {e}')
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+@sio.on('request_file_from_client')
+def on_request_file_from_client(data):
+    """Servidor solicita un archivo de este cliente"""
+    try:
+        file_path = data.get('file_path')
+        transfer_id = data.get('transfer_id')
+        
+        logger.info(f'📤 Servidor solicita archivo: {file_path}')
+        
+        # Verificar que el archivo existe
+        if not os.path.exists(file_path):
+            logger.error(f'Archivo no encontrado: {file_path}')
+            sio.emit('file_send_error', {
                 'client_id': get_client_id(),
-                'filename': filename
+                'transfer_id': transfer_id,
+                'error': 'Archivo no encontrado'
+            })
+            return
+        
+        # Leer archivo y convertir a base64
+        try:
+            with open(file_path, 'rb') as f:
+                file_bytes = f.read()
+            
+            file_data = base64.b64encode(file_bytes).decode('utf-8')
+            filename = os.path.basename(file_path)
+            
+            # Enviar al servidor
+            sio.emit('send_file_to_server', {
+                'client_id': get_client_id(),
+                'transfer_id': transfer_id,
+                'filename': filename,
+                'file_data': file_data
+            })
+            
+            logger.info(f'✅ Archivo enviado al servidor: {filename} ({len(file_bytes)} bytes)')
+            
+            if gui:
+                gui.log_transfer(f"Archivo enviado al servidor: {filename}", "success")
+            
+        except Exception as e:
+            logger.error(f'Error leyendo archivo: {e}')
+            sio.emit('file_send_error', {
+                'client_id': get_client_id(),
+                'transfer_id': transfer_id,
+                'error': str(e)
             })
         
     except Exception as e:
-        logger.error(f'Error recibiendo chunk: {e}')
+        logger.error(f'Error procesando solicitud de archivo: {e}')
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 # ============= Chat =============
@@ -558,9 +625,58 @@ def send_message_to_server(message):
     except Exception as e:
         logger.error(f'Error enviando mensaje: {e}')
         return False
+
+
+def send_file_to_server_func(file_path):
+    """Enviar archivo al servidor"""
+    try:
+        if not os.path.exists(file_path):
+            logger.error(f'Archivo no encontrado: {file_path}')
+            return False
+        
+        # Leer archivo y convertir a base64
+        with open(file_path, 'rb') as f:
+            file_bytes = f.read()
+        
+        file_data = base64.b64encode(file_bytes).decode('utf-8')
+        filename = os.path.basename(file_path)
+        
+        # Enviar al servidor
+        sio.emit('client_send_file', {
+            'client_id': get_client_id(),
+            'filename': filename,
+            'file_data': file_data
+        })
+        
+        logger.info(f'✅ Archivo enviado al servidor: {filename} ({len(file_bytes)} bytes)')
+        return True
         
     except Exception as e:
-        logger.error(f'Error procesando mensaje: {e}')
+        logger.error(f'Error enviando archivo: {e}')
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+
+@sio.on('file_send_confirmation')
+def on_file_send_confirmation(data):
+    """Recibir confirmación de archivo enviado"""
+    try:
+        filename = data.get('filename')
+        success = data.get('success')
+        message = data.get('message', '')
+        error = data.get('error', '')
+        
+        if success:
+            logger.info(f'✅ Confirmación: {filename} - {message}')
+            if gui:
+                gui.log_transfer(f"✓ Servidor recibió: {filename}", "success")
+        else:
+            logger.error(f'❌ Error: {filename} - {error}')
+            if gui:
+                gui.log_transfer(f"✗ Error: {error}", "error")
+    except Exception as e:
+        logger.error(f'Error procesando confirmación: {e}')
 
 
 @sio.on('request_chat_response')
@@ -676,6 +792,7 @@ def main():
         # Crear GUI
         gui = ClientGUI(send_message_to_server)
         gui.setup_gui()
+        gui.set_file_transfer_callback(send_file_to_server_func)
         
         # Conectar al servidor en un thread separado
         def connect_to_server():
